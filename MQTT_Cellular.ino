@@ -4,6 +4,7 @@
     CAT-M to connect to the MQTT server and implement publishing GPS Location messages.
     Check the status through Serial and Screen. 
     When the MQTT connection is successful, check your MQTT Subscriber
+    V1.1 added resets when the cell network doesn't connect. Previously would hang.
 */
 
 #include "M5StickCPlus2.h"
@@ -69,6 +70,8 @@ String getGPS() {
   String lng;
   String nmeaTime;
   String data;
+
+  wakeup();
   
   while (1) {
       /* Print GNSS info every 1s */
@@ -114,14 +117,9 @@ void gps_power_on()
         delay(1000);
     }
 
-    // Output NMEA GPGSS FORMAT
-    device.sendMsg("AT+SGNSCFG=\"NMEATYPE\",64\r\n");
-    String readstr = device.waitMsg(1000);
-    log(readstr);
-  
     // Ready to print GPS info 
     log("\nReady for GPS syncing!\n");
-    delay(1000);
+    delay(2000);
 }
 
 // TURN OFF GPS
@@ -130,7 +128,7 @@ void gps_power_off()
     log("\nPowering OFF GPS..\n");
     while (device.send_and_getMsg("AT+CGNSPWR=0\r\n").indexOf("OK") == -1) {
         //log("..");
-        delay(1000);
+        delay(2000);
     }
 
 }
@@ -142,7 +140,7 @@ int activate_network()
       delay(1000);
       // APP Network Active
       device.sendMsg("AT+CNACT=0,1\r\n");
-      readstr = device.waitMsg(200);
+      readstr = device.waitMsg(500);
       log(readstr);
       delay(1000);
 
@@ -151,16 +149,19 @@ int activate_network()
       {
         // Print Network Response IP
         device.sendMsg("AT+CNACT?\r\n");
-        readstr = device.waitMsg(200);
+        readstr = device.waitMsg(500);
         log(readstr);
 
-        if(readstr.indexOf("+CNAC: 0,0") ==-1){
+        if(readstr.indexOf("0,0,") ==-1){
             cnt = 1;
             break;
         }
         if(cnt > 10) {
-            cnt = 0;
-            break;
+           cnt = -1;
+           log("Failed to get IP address");
+           delay(5000);
+           ESP.restart();
+           break;
         }
         cnt++;
         delay(1000);
@@ -172,6 +173,8 @@ int activate_network()
 void deactivate_network()
 {
       log("DEACTIVATING NETWORK..");
+      delay(1000);
+      device.sendMsg("AT+SMDISC\r\n");
       delay(1000);
       device.sendMsg("AT+CNACT=0,0\r\n");
       readstr = device.waitMsg(200);
@@ -219,7 +222,7 @@ void send_mqtt(String writestr)
         readstr = device.waitMsg(5000);
         log(readstr);
 
-	// SMCONN can return error even if it actually can send msg(?)
+	// SMCONN can return error even if it actually can send msg(why?)
         //if(readstr.indexOf("ERROR") == -1) {
         //    break;
         //}
@@ -231,6 +234,16 @@ void send_mqtt(String writestr)
         delay(1000);
 
 }
+
+// WAKE THE SIM7080 MODULE into CMD MODE
+void wakeup()
+{
+     while (device.send_and_getMsg("AT\r\n").indexOf("OK") == -1) {
+        log("wakeup()..\n");
+        delay(500);
+    }
+}
+
 
 
 // ------
@@ -244,19 +257,21 @@ void setup()
     StickCP2.Display.setTextSize(2);
 
     log("STARTING UP");
-    delay(2000);
+    delay(1000);
 
-    //SIM7020
+    //SIM7080
     device.Init(&Serial2, 33, 32);
 
+     wakeup();
      log("\nReboot SIM7080G..\n");
      while (device.send_and_getMsg("AT+CREBOOT\r\n").indexOf("OK") == -1) {
         //log("..");
         delay(1000);
     }
+    delay(5000);
+    wakeup();
     gps_power_off();
 
- 
     // APN MANUAL
     log("\nSETTING UP CELLULAR\n");
     device.sendMsg("AT+CFUN=0\r\n");
@@ -264,7 +279,7 @@ void setup()
     log(readstr);
     delay(1000);
 
-    device.sendMsg("AT+CGDCONT=1,\"IP\",\"simbase\"\r\n");
+    device.sendMsg("AT+CGDCONT=1,\"IP\",\""+APN+"\"\r\n");
     readstr = device.waitMsg(1000);
     log(readstr);
     delay(1000);
@@ -288,14 +303,15 @@ void setup()
     log(readstr);
     delay(1000);
 
-    // Check APN
-    device.sendMsg("AT+CNCFG=0,1,\"simbase\"\r\n");
+    // SET APN
+    device.sendMsg("AT+CNCFG=0,1,\""+APN+"\"\r\n");
     readstr = device.waitMsg(1000);
     log(readstr);
     delay(1000);
 
     // SIGNAL QUALITY
     log("\nChecking Signal Quality\n");
+    int cnt =0;
     while(1){
         device.sendMsg("AT+CSQ\r\n");
         readstr = device.waitMsg(2000);
@@ -303,8 +319,15 @@ void setup()
         if(readstr.indexOf("+CSQ: 99,99") ==-1){
             break;
         }
+        if (cnt > 10)
+        {
+          log("No Signal");
+          delay(5000);
+          ESP.restart();
+        }
+        cnt++;
     }
-    deactivate_network();
+    activate_network();
 }
 
 
@@ -319,5 +342,7 @@ void loop()
       {
         send_mqtt(writestr);
       }
-      deactivate_network();
+      delay(500);
+      //deactivate_network(); // Appears not needed.
+      delay(1000);
 }
